@@ -38,68 +38,79 @@ export default function ImageCard({
   const [showComparison, setShowComparison] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
 
   // Draw image and selection on canvas
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !image.originalUrl) return;
+    if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const imgSrc = showComparison && image.processedUrl ? image.processedUrl : image.originalUrl;
+    if (!imgSrc) return;
+
     const img = new Image();
     img.onload = () => {
-      canvas.width = img.width * zoom;
-      canvas.height = img.height * zoom;
+      imageRef.current = img;
+
+      // Set canvas to actual image size (not zoomed for display)
+      canvas.width = img.width;
+      canvas.height = img.height;
 
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0);
 
-      // Draw the appropriate image (processed or original)
-      if (showComparison && image.processedUrl) {
-        const processedImg = new Image();
-        processedImg.onload = () => {
-          ctx.drawImage(processedImg, 0, 0, canvas.width, canvas.height);
-        };
-        processedImg.src = image.processedUrl;
-      } else {
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      }
-
-      // Draw selection rectangle
-      if (image.selection && !showComparison) {
+      // Draw selection rectangle (only on original, not processed)
+      if (image.selection && !showComparison && image.status !== 'completed') {
         ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 8]);
         ctx.strokeRect(
-          image.selection.x * zoom,
-          image.selection.y * zoom,
-          image.selection.width * zoom,
-          image.selection.height * zoom
+          image.selection.x,
+          image.selection.y,
+          image.selection.width,
+          image.selection.height
         );
         ctx.setLineDash([]);
+
+        // Draw semi-transparent overlay on selection
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.1)';
+        ctx.fillRect(
+          image.selection.x,
+          image.selection.y,
+          image.selection.width,
+          image.selection.height
+        );
       }
     };
-    img.src = showComparison && image.processedUrl ? image.processedUrl : image.originalUrl;
-  }, [image, zoom, showComparison]);
+    img.src = imgSrc;
+  }, [image.originalUrl, image.processedUrl, image.selection, image.status, showComparison]);
 
   useEffect(() => {
     drawCanvas();
   }, [drawCanvas]);
 
-  // Canvas mouse handlers for selection
+  // Get coordinates relative to the actual image (accounting for CSS scaling)
   const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
+
     const rect = canvas.getBoundingClientRect();
+    // Calculate the scale factor between displayed size and actual canvas size
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
     return {
-      x: Math.floor((e.clientX - rect.left) / zoom),
-      y: Math.floor((e.clientY - rect.top) / zoom),
+      x: Math.floor((e.clientX - rect.left) * scaleX),
+      y: Math.floor((e.clientY - rect.top) * scaleY),
     };
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (image.status === 'processing' || showComparison) return;
+    if (image.status === 'processing' || image.status === 'completed' || showComparison) return;
     const coords = getCanvasCoords(e);
     setIsSelecting(true);
     setSelectionStart(coords);
@@ -109,11 +120,18 @@ export default function ImageCard({
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isSelecting || !selectionStart) return;
     const coords = getCanvasCoords(e);
+
+    // Clamp coordinates to image bounds
+    const x = Math.max(0, Math.min(coords.x, image.originalWidth));
+    const y = Math.max(0, Math.min(coords.y, image.originalHeight));
+    const startX = Math.max(0, Math.min(selectionStart.x, image.originalWidth));
+    const startY = Math.max(0, Math.min(selectionStart.y, image.originalHeight));
+
     onSelectionChange(image.id, {
-      x: Math.min(selectionStart.x, coords.x),
-      y: Math.min(selectionStart.y, coords.y),
-      width: Math.abs(coords.x - selectionStart.x),
-      height: Math.abs(coords.y - selectionStart.y),
+      x: Math.min(startX, x),
+      y: Math.min(startY, y),
+      width: Math.abs(x - startX),
+      height: Math.abs(y - startY),
     });
   };
 
@@ -125,10 +143,10 @@ export default function ImageCard({
   // Auto-detect watermark position
   const autoDetect = () => {
     onSelectionChange(image.id, {
-      x: image.originalWidth - 200,
-      y: image.originalHeight - 80,
-      width: 180,
-      height: 60,
+      x: Math.max(0, image.originalWidth - 200),
+      y: Math.max(0, image.originalHeight - 80),
+      width: Math.min(180, image.originalWidth),
+      height: Math.min(60, image.originalHeight),
     });
   };
 
@@ -142,6 +160,22 @@ export default function ImageCard({
       downloadImage(image.processedUrl, filename);
     }
   };
+
+  // Calculate display dimensions
+  const maxDisplayWidth = 600;
+  const maxDisplayHeight = 300;
+  const aspectRatio = image.originalWidth / image.originalHeight;
+  let displayWidth = image.originalWidth * zoom;
+  let displayHeight = image.originalHeight * zoom;
+
+  if (displayWidth > maxDisplayWidth) {
+    displayWidth = maxDisplayWidth;
+    displayHeight = displayWidth / aspectRatio;
+  }
+  if (displayHeight > maxDisplayHeight) {
+    displayHeight = maxDisplayHeight;
+    displayWidth = displayHeight * aspectRatio;
+  }
 
   return (
     <div className="glass rounded-xl overflow-hidden">
@@ -174,17 +208,22 @@ export default function ImageCard({
       {/* Canvas area */}
       <div
         ref={containerRef}
-        className="relative bg-black/30 overflow-auto max-h-[260px] sm:max-h-[320px]"
+        className="relative bg-black/30 overflow-auto max-h-[320px]"
       >
         <div className="flex justify-center p-2">
           <canvas
             ref={canvasRef}
-            className={`${image.status !== 'processing' && !showComparison ? 'cursor-crosshair' : ''}`}
+            className={`${image.status === 'pending' && !showComparison ? 'cursor-crosshair' : 'cursor-default'}`}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
-            style={{ maxWidth: '100%', height: 'auto' }}
+            style={{
+              width: displayWidth * zoom,
+              height: displayHeight * zoom,
+              maxWidth: '100%',
+              objectFit: 'contain'
+            }}
           />
         </div>
 
@@ -232,7 +271,7 @@ export default function ImageCard({
           </div>
 
           {/* Selection controls */}
-          {image.status !== 'processing' && image.status !== 'completed' && (
+          {image.status === 'pending' && (
             <>
               <button
                 onClick={autoDetect}
@@ -273,7 +312,7 @@ export default function ImageCard({
                 }`}
               >
                 <Eye className="w-3 h-3" />
-                {showComparison ? 'After' : 'Compare'}
+                {showComparison ? 'Showing After' : 'Show Before'}
               </button>
               <button
                 onClick={handleDownload}

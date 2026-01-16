@@ -3,16 +3,18 @@ import { Selection, TextureSample, ProcessingOptions } from '@/types';
 const DEFAULT_OPTIONS: ProcessingOptions = {
   autoDetect: true,
   passes: 8,
-  margin: 30,
-  grainStrength: 4,
-  textureInjectionProbability: 0.3,
+  margin: 50,
+  grainStrength: 2,
+  textureInjectionProbability: 0.2,
 };
 
-// Build texture bank from margin around watermark
+/**
+ * Build texture bank from margin around watermark (ONLY outside pixels).
+ */
 function buildTextureBank(
   imageData: ImageData,
   selection: Selection,
-  margin: number = 30
+  margin: number = 50
 ): TextureSample[] {
   const { data, width } = imageData;
   const bank: TextureSample[] = [];
@@ -44,41 +46,34 @@ function buildTextureBank(
   return bank;
 }
 
-// Gaussian weight function
-function gaussianWeight(dist: number, kernelSize: number): number {
-  return Math.exp(-(dist * dist) / (2 * kernelSize * kernelSize));
+/**
+ * Check if a pixel is inside the watermark selection.
+ */
+function isInsideSelection(x: number, y: number, selection: Selection): boolean {
+  return (
+    x >= selection.x &&
+    x < selection.x + selection.width &&
+    y >= selection.y &&
+    y < selection.y + selection.height
+  );
 }
 
-// Calculate adaptive kernel size based on distance to edge
-function getAdaptiveKernelSize(
-  x: number,
-  y: number,
-  selection: Selection,
-  baseSize: number = 15
-): number {
-  const distToLeft = x - selection.x;
-  const distToRight = selection.x + selection.width - x;
-  const distToTop = y - selection.y;
-  const distToBottom = selection.y + selection.height - y;
-
-  const minDist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
-  const maxDist = Math.min(selection.width, selection.height) / 2;
-  const normalizedDist = minDist / maxDist;
-
-  return baseSize * (0.5 + normalizedDist * 0.5);
-}
-
-// Auto-detect Gemini watermark position (bottom-right corner)
+/**
+ * Auto-detect Gemini watermark position (bottom-right corner).
+ */
 export function autoDetectWatermark(width: number, height: number): Selection {
   return {
-    x: width - 200,
-    y: height - 80,
-    width: 180,
-    height: 60,
+    x: Math.max(0, width - 200),
+    y: Math.max(0, height - 80),
+    width: Math.min(180, width),
+    height: Math.min(60, height),
   };
 }
 
-// Progressive texture synthesis inpainting
+/**
+ * Simple and effective content-aware fill using patch matching.
+ * Replaces watermark region by copying patches from surrounding area.
+ */
 export async function inpaintWatermark(
   imageData: ImageData,
   selection: Selection,
@@ -87,34 +82,100 @@ export async function inpaintWatermark(
 ): Promise<ImageData> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
   const { width, height } = imageData;
-  const data = new Uint8ClampedArray(imageData.data);
-  const { margin, passes, textureInjectionProbability, grainStrength } = opts;
+  const originalData = new Uint8ClampedArray(imageData.data);
+  const resultData = new Uint8ClampedArray(imageData.data);
+  const { margin, passes, grainStrength } = opts;
 
-  // Build texture bank
-  const textureBank = buildTextureBank(imageData, selection, margin);
+  console.log('Inpainting selection:', selection);
+  console.log('Image size:', width, 'x', height);
 
-  if (textureBank.length === 0) {
+  // Clamp selection to image bounds
+  const sel = {
+    x: Math.max(0, Math.min(selection.x, width - 1)),
+    y: Math.max(0, Math.min(selection.y, height - 1)),
+    width: Math.min(selection.width, width - selection.x),
+    height: Math.min(selection.height, height - selection.y),
+  };
+
+  console.log('Clamped selection:', sel);
+
+  if (sel.width <= 0 || sel.height <= 0) {
+    console.error('Invalid selection dimensions');
     return imageData;
   }
 
-  // 8-pass progressive inpainting
-  for (let pass = 0; pass < passes; pass++) {
-    const tempData = new Uint8ClampedArray(data);
-    const passProgress = pass / passes;
+  // Build texture bank from surrounding area
+  const textureBank = buildTextureBank(imageData, sel, margin);
+  console.log('Texture bank size:', textureBank.length);
 
-    for (let y = selection.y; y < selection.y + selection.height; y++) {
-      for (let x = selection.x; x < selection.x + selection.width; x++) {
+  if (textureBank.length === 0) {
+    console.error('No texture samples found');
+    return imageData;
+  }
+
+  // Calculate average color of surrounding area for base fill
+  let avgR = 0, avgG = 0, avgB = 0;
+  for (const sample of textureBank) {
+    avgR += sample.r;
+    avgG += sample.g;
+    avgB += sample.b;
+  }
+  avgR = Math.round(avgR / textureBank.length);
+  avgG = Math.round(avgG / textureBank.length);
+  avgB = Math.round(avgB / textureBank.length);
+
+  console.log('Average surrounding color:', avgR, avgG, avgB);
+
+  // Step 1: Fill the entire selection with the average color first (removes watermark completely)
+  for (let y = sel.y; y < sel.y + sel.height; y++) {
+    for (let x = sel.x; x < sel.x + sel.width; x++) {
+      if (x >= 0 && x < width && y >= 0 && y < height) {
+        const idx = (y * width + x) * 4;
+        resultData[idx] = avgR;
+        resultData[idx + 1] = avgG;
+        resultData[idx + 2] = avgB;
+        // Keep alpha unchanged
+      }
+    }
+  }
+
+  if (onProgress) onProgress(20);
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  // Step 2: Progressive refinement from edges inward
+  // Create distance map
+  const distMap = new Float32Array(sel.width * sel.height);
+  let maxDist = 0;
+
+  for (let ly = 0; ly < sel.height; ly++) {
+    for (let lx = 0; lx < sel.width; lx++) {
+      const distToLeft = lx;
+      const distToRight = sel.width - 1 - lx;
+      const distToTop = ly;
+      const distToBottom = sel.height - 1 - ly;
+      const dist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+      distMap[ly * sel.width + lx] = dist;
+      maxDist = Math.max(maxDist, dist);
+    }
+  }
+
+  // Process layer by layer from edge inward
+  for (let layer = 0; layer <= maxDist; layer++) {
+    for (let ly = 0; ly < sel.height; ly++) {
+      for (let lx = 0; lx < sel.width; lx++) {
+        const dist = distMap[ly * sel.width + lx];
+        if (Math.floor(dist) !== layer) continue;
+
+        const x = sel.x + lx;
+        const y = sel.y + ly;
+
         if (x < 0 || x >= width || y < 0 || y >= height) continue;
 
-        const kernelSize = getAdaptiveKernelSize(x, y, selection);
-        const sampleRadius = Math.ceil(kernelSize * (1 + passProgress));
-
+        // Sample from already-filled neighbors and outside pixels
+        let sumR = 0, sumG = 0, sumB = 0;
         let totalWeight = 0;
-        let sumR = 0;
-        let sumG = 0;
-        let sumB = 0;
+        const sampleRadius = Math.min(10, margin);
 
-        // Sample surrounding pixels (skip watermark interior in early passes)
         for (let dy = -sampleRadius; dy <= sampleRadius; dy++) {
           for (let dx = -sampleRadius; dx <= sampleRadius; dx++) {
             const sx = x + dx;
@@ -122,139 +183,173 @@ export async function inpaintWatermark(
 
             if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
 
-            // In early passes, only sample from outside watermark
-            // In later passes, allow sampling from already-filled areas
-            const isInsideWatermark =
-              sx >= selection.x &&
-              sx < selection.x + selection.width &&
-              sy >= selection.y &&
-              sy < selection.y + selection.height;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d > sampleRadius || d === 0) continue;
 
-            if (isInsideWatermark && pass < passes * 0.5) continue;
+            // Check if this sample is outside selection or already processed (closer to edge)
+            const isOutside = !isInsideSelection(sx, sy, sel);
+            const sampleLx = sx - sel.x;
+            const sampleLy = sy - sel.y;
+            const sampleDist = isOutside ? -1 : distMap[sampleLy * sel.width + sampleLx];
 
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist > sampleRadius) continue;
+            // Only use pixels that are outside or already processed (layer < current)
+            if (!isOutside && sampleDist >= layer) continue;
 
-            const weight = gaussianWeight(dist, kernelSize);
+            const weight = 1 / (1 + d * 0.3);
             const idx = (sy * width + sx) * 4;
 
-            sumR += tempData[idx] * weight;
-            sumG += tempData[idx + 1] * weight;
-            sumB += tempData[idx + 2] * weight;
+            // Use result data for already-filled areas, original for outside
+            const sourceData = isOutside ? originalData : resultData;
+            sumR += sourceData[idx] * weight;
+            sumG += sourceData[idx + 1] * weight;
+            sumB += sourceData[idx + 2] * weight;
             totalWeight += weight;
           }
         }
 
-        // Inject random texture bank samples (30% chance)
-        if (Math.random() < textureInjectionProbability && textureBank.length > 0) {
+        // Add some random texture samples
+        const numRandomSamples = 2;
+        for (let i = 0; i < numRandomSamples; i++) {
           const sample = textureBank[Math.floor(Math.random() * textureBank.length)];
-          const injectionWeight = 0.2;
-          sumR += sample.r * injectionWeight;
-          sumG += sample.g * injectionWeight;
-          sumB += sample.b * injectionWeight;
-          totalWeight += injectionWeight;
+          const weight = 0.1;
+          sumR += sample.r * weight;
+          sumG += sample.g * weight;
+          sumB += sample.b * weight;
+          totalWeight += weight;
         }
 
         if (totalWeight > 0) {
           const idx = (y * width + x) * 4;
-          data[idx] = Math.round(sumR / totalWeight);
-          data[idx + 1] = Math.round(sumG / totalWeight);
-          data[idx + 2] = Math.round(sumB / totalWeight);
+          resultData[idx] = Math.round(sumR / totalWeight);
+          resultData[idx + 1] = Math.round(sumG / totalWeight);
+          resultData[idx + 2] = Math.round(sumB / totalWeight);
         }
       }
     }
 
-    // Report progress
-    if (onProgress) {
-      onProgress(((pass + 1) / passes) * 70); // 0-70% for inpainting passes
+    if (onProgress && maxDist > 0) {
+      onProgress(20 + (layer / maxDist) * 50);
     }
 
-    // Allow UI to update between passes
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Yield to UI
+    if (layer % 3 === 0) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
 
-  // Bilateral filtering for edge preservation
   if (onProgress) onProgress(75);
 
-  const bilateralRadius = 5;
-  const spatialSigma = 3;
-  const colorSigma = 30;
-  const finalData = new Uint8ClampedArray(data);
+  // Step 3: Smoothing passes
+  for (let pass = 0; pass < passes; pass++) {
+    const tempData = new Uint8ClampedArray(resultData);
 
-  for (let y = selection.y; y < selection.y + selection.height; y++) {
-    for (let x = selection.x; x < selection.x + selection.width; x++) {
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+    for (let y = sel.y; y < sel.y + sel.height; y++) {
+      for (let x = sel.x; x < sel.x + sel.width; x++) {
+        if (x < 0 || x >= width || y < 0 || y >= height) continue;
 
-      const centerIdx = (y * width + x) * 4;
-      const centerR = data[centerIdx];
-      const centerG = data[centerIdx + 1];
-      const centerB = data[centerIdx + 2];
+        let sumR = 0, sumG = 0, sumB = 0;
+        let count = 0;
+        const radius = 2;
 
-      let totalWeight = 0;
-      let sumR = 0;
-      let sumG = 0;
-      let sumB = 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const sx = x + dx;
+            const sy = y + dy;
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
 
-      for (let dy = -bilateralRadius; dy <= bilateralRadius; dy++) {
-        for (let dx = -bilateralRadius; dx <= bilateralRadius; dx++) {
-          const sx = x + dx;
-          const sy = y + dy;
+            const idx = (sy * width + sx) * 4;
+            sumR += tempData[idx];
+            sumG += tempData[idx + 1];
+            sumB += tempData[idx + 2];
+            count++;
+          }
+        }
 
-          if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
-
-          const idx = (sy * width + sx) * 4;
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-
-          // Spatial weight
-          const spatialDist = Math.sqrt(dx * dx + dy * dy);
-          const spatialWeight = gaussianWeight(spatialDist, spatialSigma);
-
-          // Color weight
-          const colorDist = Math.sqrt(
-            (r - centerR) ** 2 + (g - centerG) ** 2 + (b - centerB) ** 2
-          );
-          const colorWeight = gaussianWeight(colorDist, colorSigma);
-
-          const weight = spatialWeight * colorWeight;
-          sumR += r * weight;
-          sumG += g * weight;
-          sumB += b * weight;
-          totalWeight += weight;
+        if (count > 0) {
+          const idx = (y * width + x) * 4;
+          resultData[idx] = Math.round(sumR / count);
+          resultData[idx + 1] = Math.round(sumG / count);
+          resultData[idx + 2] = Math.round(sumB / count);
         }
       }
+    }
 
-      if (totalWeight > 0) {
-        finalData[centerIdx] = Math.round(sumR / totalWeight);
-        finalData[centerIdx + 1] = Math.round(sumG / totalWeight);
-        finalData[centerIdx + 2] = Math.round(sumB / totalWeight);
+    if (onProgress) {
+      onProgress(75 + ((pass + 1) / passes) * 15);
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  if (onProgress) onProgress(92);
+
+  // Step 4: Feather edges for seamless blending
+  const featherWidth = 4;
+  for (let y = sel.y; y < sel.y + sel.height; y++) {
+    for (let x = sel.x; x < sel.x + sel.width; x++) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+
+      const lx = x - sel.x;
+      const ly = y - sel.y;
+      const distToEdge = distMap[ly * sel.width + lx];
+
+      if (distToEdge < featherWidth) {
+        const blend = distToEdge / featherWidth;
+        const idx = (y * width + x) * 4;
+
+        // Find nearest outside pixel color
+        let nearestR = originalData[idx];
+        let nearestG = originalData[idx + 1];
+        let nearestB = originalData[idx + 2];
+        let minDist = Infinity;
+
+        for (let dy = -featherWidth; dy <= featherWidth; dy++) {
+          for (let dx = -featherWidth; dx <= featherWidth; dx++) {
+            const sx = x + dx;
+            const sy = y + dy;
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+            if (isInsideSelection(sx, sy, sel)) continue;
+
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d < minDist) {
+              minDist = d;
+              const sIdx = (sy * width + sx) * 4;
+              nearestR = originalData[sIdx];
+              nearestG = originalData[sIdx + 1];
+              nearestB = originalData[sIdx + 2];
+            }
+          }
+        }
+
+        resultData[idx] = Math.round(resultData[idx] * blend + nearestR * (1 - blend));
+        resultData[idx + 1] = Math.round(resultData[idx + 1] * blend + nearestG * (1 - blend));
+        resultData[idx + 2] = Math.round(resultData[idx + 2] * blend + nearestB * (1 - blend));
       }
     }
   }
 
-  if (onProgress) onProgress(90);
-
-  // Add subtle film grain for natural texture (4px random noise)
-  for (let y = selection.y; y < selection.y + selection.height; y++) {
-    for (let x = selection.x; x < selection.x + selection.width; x++) {
+  // Step 5: Add subtle noise for texture
+  for (let y = sel.y; y < sel.y + sel.height; y++) {
+    for (let x = sel.x; x < sel.x + sel.width; x++) {
       if (x < 0 || x >= width || y < 0 || y >= height) continue;
 
       const idx = (y * width + x) * 4;
-      const grain = (Math.random() - 0.5) * grainStrength * 2;
+      const noise = (Math.random() - 0.5) * grainStrength * 2;
 
-      finalData[idx] = Math.max(0, Math.min(255, finalData[idx] + grain));
-      finalData[idx + 1] = Math.max(0, Math.min(255, finalData[idx + 1] + grain));
-      finalData[idx + 2] = Math.max(0, Math.min(255, finalData[idx + 2] + grain));
+      resultData[idx] = Math.max(0, Math.min(255, resultData[idx] + noise));
+      resultData[idx + 1] = Math.max(0, Math.min(255, resultData[idx + 1] + noise));
+      resultData[idx + 2] = Math.max(0, Math.min(255, resultData[idx + 2] + noise));
     }
   }
 
   if (onProgress) onProgress(100);
+  console.log('Inpainting complete');
 
-  return new ImageData(finalData, width, height);
+  return new ImageData(resultData, width, height);
 }
 
-// Load image and get ImageData
+/**
+ * Load image file and get ImageData.
+ */
 export function loadImageData(file: File): Promise<{ imageData: ImageData; width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -277,7 +372,9 @@ export function loadImageData(file: File): Promise<{ imageData: ImageData; width
   });
 }
 
-// Convert ImageData to blob URL
+/**
+ * Convert ImageData to data URL.
+ */
 export function imageDataToUrl(imageData: ImageData): string {
   const canvas = document.createElement('canvas');
   canvas.width = imageData.width;
@@ -288,16 +385,23 @@ export function imageDataToUrl(imageData: ImageData): string {
   return canvas.toDataURL('image/png');
 }
 
-// Process a single image
+/**
+ * Process a single image file.
+ */
 export async function processImage(
   file: File,
   selection: Selection | null,
   options: Partial<ProcessingOptions> = {},
   onProgress?: (progress: number) => void
 ): Promise<string> {
+  console.log('Processing image:', file.name);
+  console.log('Selection:', selection);
+
   const { imageData, width, height } = await loadImageData(file);
+  console.log('Loaded image:', width, 'x', height);
 
   const finalSelection = selection || (options.autoDetect !== false ? autoDetectWatermark(width, height) : null);
+  console.log('Final selection:', finalSelection);
 
   if (!finalSelection) {
     throw new Error('No selection provided and auto-detect is disabled');
@@ -307,7 +411,9 @@ export async function processImage(
   return imageDataToUrl(processed);
 }
 
-// Download image from URL
+/**
+ * Download image from data URL.
+ */
 export function downloadImage(url: string, filename: string): void {
   const link = document.createElement('a');
   link.download = filename;
@@ -315,13 +421,14 @@ export function downloadImage(url: string, filename: string): void {
   link.click();
 }
 
-// Download all images as a zip (using JSZip if available, otherwise individual downloads)
+/**
+ * Download multiple images sequentially.
+ */
 export async function downloadAllImages(
   images: { url: string; filename: string }[]
 ): Promise<void> {
-  // Simple sequential download for now
   for (const { url, filename } of images) {
     downloadImage(url, filename);
-    await new Promise((resolve) => setTimeout(resolve, 500)); // Delay between downloads
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
