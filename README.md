@@ -1,36 +1,74 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Gemini Watermark Remover
+
+Fast, client-side watermark removal for Gemini-generated images. Upload one or many images, select the watermark area (auto-detect or manual), process locally in the browser, and download clean PNGs.
+
+## Features
+
+- Drag-and-drop multi-image upload with preview
+- Auto-detect Gemini watermark position or draw a custom selection
+- Batch processing with progress feedback
+- Before/after comparison toggle
+- Mobile-friendly, dark UI with green accent
+
+## Tech Stack
+
+- Next.js (App Router)
+- TypeScript (strict)
+- Tailwind CSS
+- shadcn/ui styling conventions
+- Canvas-based image processing in the browser
+
+## Requirements
+
+- Node.js 18+
+- npm 9+
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000` in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Usage
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Upload one or more images (PNG, JPG, WebP).
+2. Use Auto-detect or draw a box around the watermark.
+3. Process the image(s).
+4. Download cleaned PNGs.
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
+- `npm run dev` - Start the dev server
+- `npm run build` - Create a production build
+- `npm run start` - Run the production server
+- `npm run lint` - Lint the codebase
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- All processing happens in your browser. Images are not uploaded to a server.
+- Best results come from selecting the smallest watermark region possible.
 
-## Deploy on Vercel
+## Project Structure
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+src/
+  app/            Next.js App Router routes and layout
+  components/     UI components
+  lib/            Image processing logic
+  types/          Shared TypeScript types
+public/           Static assets
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## License
+
+MIT
